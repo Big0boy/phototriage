@@ -3,6 +3,10 @@
 > **3,000 frames come off the card. The photographer only wants to look at 400.**  
 > Find blurry and near-duplicate photos, and categorize keepers with an open-weight model running entirely on your own machine.
 
+<p align="center">
+  <img src="assets/report-preview.png" alt="phototriage review report" width="100%">
+</p>
+
 Nothing is uploaded. The only optional network access in an `--ai` run is the one-time download of open CLIP weights to `~/.cache/huggingface/`. After that, the tool works 100% offline. No client photo, thumbnail, or score ever leaves your drive.
 
 ---
