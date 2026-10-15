@@ -564,3 +564,61 @@ def test_no_images_is_a_clean_failure(tmp_path):
     result = run_cli("scan", empty, "--no-ai")
     assert result.returncode == 1
     assert "no images found" in result.stdout
+
+
+def test_focus_scores_handles_tiny_and_single_pixel_images():
+    import numpy as np
+
+    single = np.array([[128]], dtype="uint8")
+    f, p90, med = pt.focus_scores(single)
+    assert not np.isnan(f) and f == 0.0
+    assert not np.isnan(p90) and p90 == 0.0
+    assert not np.isnan(med) and med == 0.0
+
+    tiny = np.array([[0, 255], [255, 0]], dtype="uint8")
+    f, p90, med = pt.focus_scores(tiny)
+    assert not np.isnan(f) and f == 0.0
+
+
+def test_version_flag():
+    result = run_cli("--version")
+    assert result.returncode == 0
+    assert f"phototriage {pt.SCHEMA_VERSION}.0.0" in result.stdout
+
+
+def test_dedupe_embedding_fallback_warning(shoot):
+    result = run_cli("scan", shoot, "--no-ai", "--no-thumbs", "--dedupe", "embedding")
+    assert result.returncode == 0
+    assert "warning: --dedupe embedding requires --ai" in result.stderr
+
+
+def test_dry_run_messaging(shoot):
+    run_cli("scan", shoot, "--no-ai", "--no-thumbs", "--sensitivity", "high")
+    result = run_cli("apply", shoot, "--dry-run")
+    assert result.returncode == 0
+    assert "would be moved" in result.stdout
+    assert "dry run, nothing changed" in result.stdout
+
+
+def test_unique_destination_with_reserved(tmp_path):
+    f = tmp_path / "photo.jpg"
+    reserved = set()
+    first = pt.unique_destination(f, reserved)
+    assert first == f
+    assert f in reserved
+    second = pt.unique_destination(f, reserved)
+    assert second == tmp_path / "photo__1.jpg"
+    assert second in reserved
+
+
+def test_uri_and_command_quoted_for_paths_with_spaces(tmp_path):
+    import shlex
+
+    spaced_dir = tmp_path / "my shoot (2026)"
+    spaced_dir.mkdir()
+    texture().save(spaced_dir / "sharp.jpg", "JPEG", quality=92)
+    result = run_cli("scan", spaced_dir, "--no-ai", "--no-thumbs")
+    assert result.returncode == 0
+    assert "file://" in result.stdout
+    assert "my%20shoot%20%282026%29" in result.stdout
+    assert shlex.quote(str(spaced_dir)) in result.stdout

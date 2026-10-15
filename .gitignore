@@ -2,7 +2,12 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-
+PLAN.md
 # default output of a scan run in place
 .phototriage/
 _FirstPass_rejected/
+
+# Python packaging
+*.egg-info/
+build/
+dist/
