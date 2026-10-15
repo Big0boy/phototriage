@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phototriage"
+version = "3.0.0"
+description = "Find the blurry and near-duplicate frames in a shoot, and file the rest by content."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "pillow>=10.0",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+ai = [
+    "torch>=2.2",
+    "transformers>=4.35",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+phototriage = "phototriage:main"

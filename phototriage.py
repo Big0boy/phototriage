@@ -190,10 +190,15 @@ def focus_scores(gray: "np.ndarray") -> tuple[float, float, float]:
     )
     lap = lap[1:-1, 1:-1]
 
+    if lap.size == 0:
+        return 0.0, 0.0, 0.0
+
     tile = TILE if min(lap.shape) >= TILE * 4 else max(8, min(TILE, min(lap.shape) // 4))
     ny, nx = lap.shape[0] // tile, lap.shape[1] // tile
     if ny < 1 or nx < 1:
         whole = float(lap.var())
+        if np.isnan(whole):
+            whole = 0.0
         return whole, whole, whole
 
     cropped = lap[: ny * tile, : nx * tile]
@@ -397,7 +402,8 @@ class ClipTagger:
             text_features = text_features / text_features.norm(dim=-1, keepdim=True)
         self.text_features = text_features
 
-    def run(self, paths: list[Path], batch_size: int | None = None):
+    def run(self, paths: list[Path], batch_size: int | None = None,
+            progress: bool = False):
         """Score image paths in bounded batches.
 
         Frames are decoded one batch at a time and released immediately. Holding 3,000
@@ -410,7 +416,8 @@ class ClipTagger:
 
         size = batch_size or self.batch_size
         embeddings, probs = [], []
-        for start in range(0, len(paths), size):
+        total = len(paths)
+        for start in range(0, total, size):
             images = []
             for path in paths[start : start + size]:
                 with Image.open(path) as img:
@@ -427,6 +434,9 @@ class ClipTagger:
             embeddings.append(features.cpu().float().numpy())
             probs.append(batch_probs.cpu().float().numpy())
             del images, inputs, features, logits, batch_probs
+            if progress:
+                done = min(start + size, total)
+                print(f"  categorised {done}/{total}", flush=True)
         if not embeddings:
             return np.zeros((0, 0), dtype="float32"), np.zeros((0, len(self.labels)), dtype="float32")
         return np.vstack(embeddings), np.vstack(probs)
@@ -451,7 +461,9 @@ def group_bursts(records: list[Record], window: float, mode: str,
         if mode == "embedding" and embeddings is not None:
             import numpy as np
 
-            return float(np.dot(embeddings[a._idx], embeddings[b._idx])) >= cosine
+            if hasattr(a, "_idx") and hasattr(b, "_idx"):
+                return float(np.dot(embeddings[a._idx], embeddings[b._idx])) >= cosine
+            return False
         if hamming(a.dhash, b.dhash) > hash_distance:
             return False
         # the guard: the hash must be corroborated by matching shape
@@ -716,7 +728,7 @@ def cmd_scan(args) -> int:
         try:
             tagger = ClipTagger(args.model, labels, args.device, args.batch, args.offline)
             print(f"  categorising {len(live)} frames with {args.model} on {tagger.device}")
-            embeddings, probs = tagger.run([root / rec.path for rec in live])
+            embeddings, probs = tagger.run([root / rec.path for rec in live], progress=True)
             for idx, rec in enumerate(live):
                 order = probs[idx].argsort()[::-1]
                 top, second = int(order[0]), int(order[1]) if len(order) > 1 else int(order[0])
@@ -737,6 +749,8 @@ def cmd_scan(args) -> int:
             rec.group_size = 0
     else:
         mode = "embedding" if (embeddings is not None and args.dedupe == "embedding") else "hash"
+        if args.dedupe == "embedding" and mode == "hash":
+            print("warning: --dedupe embedding requires --ai; falling back to hash", file=sys.stderr)
         group_bursts(records, args.burst_window, mode, embeddings=embeddings)
 
     # --- verdicts -------------------------------------------------------------------
@@ -770,8 +784,11 @@ def cmd_scan(args) -> int:
         if counts.get(verdict):
             print(f"  {verdict:22} {counts[verdict]:5}")
     print(f"\n{meta.seconds:.1f}s · {len(files) / max(meta.seconds, 0.001):.1f} images/s")
-    print(f"\nreview the plan:  file://{out_dir / 'report.html'}")
-    print(f"then apply it:    python {Path(sys.argv[0]).name} apply {root}"
+    from urllib.parse import quote as urlquote
+    import shlex
+    report_uri = "file://" + urlquote(str(out_dir / "report.html"))
+    print(f"\nreview the plan:  {report_uri}")
+    print(f"then apply it:    python {Path(sys.argv[0]).name} apply {shlex.quote(str(root))}"
           + ("" if meta_ai[0] else "   # add --ai to scan for categories"))
     return 0
 
@@ -793,13 +810,17 @@ def load_categories(args) -> list[str]:
 # --------------------------------------------------------------------------------------
 
 
-def unique_destination(dest: Path) -> Path:
-    if not dest.exists():
+def unique_destination(dest: Path, reserved: set[Path] | None = None) -> Path:
+    if not dest.exists() and (reserved is None or dest not in reserved):
+        if reserved is not None:
+            reserved.add(dest)
         return dest
     stem, suffix = dest.stem, dest.suffix
     for counter in range(1, 10_000):
         candidate = dest.with_name(f"{stem}__{counter}{suffix}")
-        if not candidate.exists():
+        if not candidate.exists() and (reserved is None or candidate not in reserved):
+            if reserved is not None:
+                reserved.add(candidate)
             return candidate
     raise RuntimeError(f"could not find a free filename for {dest}")
 
@@ -836,6 +857,7 @@ def cmd_apply(args) -> int:
     quarantine = root / QUARANTINE_DIR
     moved = deleted = skipped = 0
     freed = 0
+    reserved: set[Path] = set()
 
     for rec in rejects:
         source = root / rec.path
@@ -861,7 +883,7 @@ def cmd_apply(args) -> int:
                 deleted += 1
         else:
             bucket = quarantine / rec.verdict.split(":", 1)[1]
-            dest = unique_destination(bucket / source.name)
+            dest = unique_destination(bucket / source.name, reserved)
             if args.dry_run:
                 print(f"  would {action} {rec.path} -> {dest.relative_to(root)}")
             else:
@@ -873,12 +895,20 @@ def cmd_apply(args) -> int:
                 moved += 1
 
     if action == "delete":
-        print(f"\n{deleted} deleted, {freed / 1_000_000:.1f} MB freed, {skipped} skipped")
+        if args.dry_run:
+            print(f"\n{len(rejects) - skipped} would be deleted, {skipped} skipped (dry run, nothing changed)")
+        else:
+            print(f"\n{deleted} deleted, {freed / 1_000_000:.1f} MB freed, {skipped} skipped")
     else:
-        print(f"\n{moved} {'moved' if action == 'move' else 'copied'} to {quarantine.relative_to(root.parent)}"
-              f", {skipped} skipped")
-        if action == "move":
-            print("originals are recoverable from the quarantine folder until you empty it")
+        verb = "moved" if action == "move" else "copied"
+        if args.dry_run:
+            print(f"\n{len(rejects) - skipped} would be {verb} to {quarantine.relative_to(root.parent)}"
+                  f", {skipped} skipped (dry run, nothing changed)")
+        else:
+            print(f"\n{moved} {verb} to {quarantine.relative_to(root.parent)}"
+                  f", {skipped} skipped")
+            if action == "move":
+                print("originals are recoverable from the quarantine folder until you empty it")
     return 0
 
 
@@ -900,6 +930,7 @@ def build_parser() -> argparse.ArgumentParser:
   phototriage apply ~/Pictures/shoot --action delete --yes
 """,
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {SCHEMA_VERSION}.0.0")
     sub = parser.add_subparsers(dest="command", required=True)
 
     scan = sub.add_parser("scan", help="measure every image and write a reviewable plan")
